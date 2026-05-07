@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Planify — Project Management</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: 'Inter', system-ui, sans-serif; background: #f8fafc; }
+    .sidebar { transition: all 0.2s; }
+    .card { transition: box-shadow 0.2s; }
+    .card:hover { box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+    .spinner { width:20px;height:20px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin 0.6s linear infinite;display:inline-block; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .badge { display:inline-flex;align-items:center;padding:2px 10px;border-radius:9999px;font-size:12px;font-weight:600; }
+    select, input, textarea { outline: none; }
+    .modal-backdrop { background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); }
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background:#cbd5e1;border-radius:3px; }
+    .progress-bar { height:6px;border-radius:3px;background:#e2e8f0;overflow:hidden; }
+    .progress-fill { height:100%;border-radius:3px;background:linear-gradient(90deg,#6366f1,#8b5cf6);transition:width 0.4s; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ─── API ─────────────────────────────────────────────────────────────────────
+const API_BASE = '/api';
+const getToken = () => localStorage.getItem('tf_token');
+
+const api = async (path, options = {}) => {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    ...options,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+};
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+const STATUS_CONFIG = {
+  todo: { label: 'To Do', color: '#94a3b8', bg: '#f1f5f9', text: '#475569' },
+  in_progress: { label: 'In Progress', color: '#3b82f6', bg: '#eff6ff', text: '#1d4ed8' },
+  review: { label: 'Review', color: '#f59e0b', bg: '#fffbeb', text: '#92400e' },
+  done: { label: 'Done', color: '#10b981', bg: '#ecfdf5', text: '#065f46' },
+};
+const PRIORITY_CONFIG = {
+  low: { label: 'Low', color: '#10b981', bg: '#ecfdf5', text: '#065f46' },
+  medium: { label: 'Medium', color: '#f59e0b', bg: '#fffbeb', text: '#92400e' },
+  high: { label: 'High', color: '#ef4444', bg: '#fef2f2', text: '#991b1b' },
+  urgent: { label: 'Urgent', color: '#7c3aed', bg: '#f5f3ff', text: '#5b21b6' },
+};
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '—';
+const isOverdue = (d, status) => d && status !== 'done' && new Date(d) < new Date();
+const initials = (name='') => name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
+
+const Avatar = ({ name, size = 32, color = '#6366f1' }) => (
+  <div style={{ width:size,height:size,borderRadius:'50%',background:color,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontSize:size*0.35,fontWeight:700,flexShrink:0 }}>
+    {initials(name)}
+  </div>
+);
+
+const Badge = ({ label, config }) => (
+  <span className="badge" style={{ background: config.bg, color: config.text }}>
+    {label || config.label}
+  </span>
+);
+
+const Modal = ({ title, onClose, children, wide }) => (
+  <div className="fixed inset-0 modal-backdrop flex items-center justify-center z-50 p-4" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className={`bg-white rounded-2xl shadow-2xl ${wide?'w-full max-w-2xl':'w-full max-w-md'} max-h-[90vh] overflow-y-auto`}>
+      <div className="flex items-center justify-between p-6 border-b">
+        <h2 className="text-lg font-bold text-gray-900">{title}</h2>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+      </div>
+      <div className="p-6">{children}</div>
+    </div>
+  </div>
+);
+
+const Input = ({ label, ...props }) => (
+  <div className="mb-4">
+    {label && <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>}
+    <input className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition" {...props} />
+  </div>
+);
+
+const Select = ({ label, children, ...props }) => (
+  <div className="mb-4">
+    {label && <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>}
+    <select className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:border-indigo-500 bg-white transition" {...props}>{children}</select>
+  </div>
+);
+
+const Textarea = ({ label, ...props }) => (
+  <div className="mb-4">
+    {label && <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>}
+    <textarea className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition resize-none" rows={3} {...props} />
+  </div>
+);
+
+const Btn = ({ children, loading, variant='primary', ...props }) => {
+  const base = 'inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm transition disabled:opacity-60 cursor-pointer';
+  const variants = {
+    primary: 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm',
+    secondary: 'bg-gray-100 text-gray-700 hover:bg-gray-200',
+    danger: 'bg-red-50 text-red-600 hover:bg-red-100',
+    success: 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100',
+  };
+  return (
+    <button className={`${base} ${variants[variant]}`} disabled={loading} {...props}>
+      {loading && <span className="spinner" />} {children}
+    </button>
+  );
+};
+
+const Toast = ({ msg, type }) => (
+  msg ? <div className={`fixed bottom-6 right-6 z-[100] px-5 py-3 rounded-xl shadow-lg text-white font-medium text-sm ${type==='error'?'bg-red-500':'bg-emerald-500'}`}>{msg}</div> : null
+);
+
+function useToast() {
+  const [toast, setToast] = useState(null);
+  const show = useCallback((msg, type='success') => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+  return { toast, show };
+}
+
+// ─── AUTH PAGE ────────────────────────────────────────────────────────────────
+function AuthPage({ onLogin }) {
+  const [mode, setMode] = useState('login');
+  const [form, setForm] = useState({ name:'', email:'', password:'', role:'member' });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError(''); setLoading(true);
+    try {
+      const data = await api(`/auth/${mode}`, { method:'POST', body: mode==='login'?{ email:form.email, password:form.password }:form });
+      localStorage.setItem('tf_token', data.token);
+      onLogin(data.user);
+    } catch(err) {
+      setError(err.message);
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-md">
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+            <span className="text-3xl">👌</span>
+          </div>
+          <h1 className="text-3xl font-bold text-gray-900">Planify</h1>
+          <p className="text-gray-500 mt-1">Project Management, Simplified</p>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-xl p-8 border border-gray-100">
+          <div className="flex bg-gray-100 rounded-xl p-1 mb-6">
+            {['login','signup'].map(m => (
+              <button key={m} onClick={()=>{setMode(m);setError('');}} className={`flex-1 py-2 rounded-lg text-sm font-semibold capitalize transition ${mode===m?'bg-white shadow text-indigo-600':'text-gray-500 hover:text-gray-700'}`}>{m}</button>
+            ))}
+          </div>
+
+          <form onSubmit={submit}>
+            {mode === 'signup' && (
+              <>
+                <Input label="Full Name" placeholder="John Doe" value={form.name} onChange={e=>set('name',e.target.value)} required />
+                <Select label="Role" value={form.role} onChange={e=>set('role',e.target.value)}>
+                  <option value="member">Member</option>
+                  <option value="admin">Admin</option>
+                </Select>
+              </>
+            )}
+            <Input label="Email" type="email" placeholder="you@example.com" value={form.email} onChange={e=>set('email',e.target.value)} required />
+            <Input label="Password" type="password" placeholder="Min. 6 characters" value={form.password} onChange={e=>set('password',e.target.value)} required />
+
+            {error && <div className="bg-red-50 text-red-600 text-sm rounded-xl px-4 py-3 mb-4 border border-red-100">{error}</div>}
+
+            <Btn loading={loading} className="w-full justify-center mt-2" style={{width:'100%',justifyContent:'center'}}>
+              {mode === 'login' ? '🔐 Sign In' : '🚀 Create Account'}
+            </Btn>
+          </form>
+        </div>
+
+        <p className="text-center text-sm text-gray-500 mt-4">
+          {mode==='login' ? "Don't have an account? " : "Already have an account? "}
+          <button onClick={()=>{setMode(mode==='login'?'signup':'login');setError('');}} className="text-indigo-600 font-semibold hover:underline">
+            {mode==='login'?'Sign Up':'Sign In'}
+          </button>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+function Sidebar({ user, page, setPage, onLogout }) {
+  const nav = [
+    { id:'dashboard', icon:'📊', label:'Dashboard' },
+    { id:'projects',  icon:'📁', label:'Projects' },
+    { id:'tasks',     icon:'✅', label:'Tasks' },
+    ...(user.role==='admin' ? [{ id:'team', icon:'🧑‍🤝‍🧑', label:'Team' }] : []),
+  ];
+
+  return (
+    <div className="sidebar w-64 bg-gray-900 min-h-screen flex flex-col flex-shrink-0">
+      <div className="p-6 border-b border-gray-800">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 bg-indigo-500 rounded-xl flex items-center justify-center text-lg">👌</div>
+          <span className="text-white font-bold text-lg">Planify</span>
+        </div>
+      </div>
+
+      <nav className="flex-1 p-4 space-y-1">
+        {nav.map(item => (
+          <button key={item.id} onClick={()=>setPage(item.id)}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition ${page===item.id?'bg-indigo-600 text-white':'text-gray-400 hover:bg-gray-800 hover:text-white'}`}>
+            <span>{item.icon}</span>
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </nav>
+
+      <div className="p-4 border-t border-gray-800">
+        <div className="flex items-center gap-3 mb-3 px-2">
+          <Avatar name={user.name} size={36} color={user.role==='admin'?'#7c3aed':'#0891b2'} />
+          <div className="min-w-0">
+            <p className="text-white text-sm font-medium truncate">{user.name}</p>
+            <p className="text-gray-400 text-xs capitalize">{user.role}</p>
+          </div>
+        </div>
+        <button onClick={onLogout} className="w-full flex items-center gap-2 px-4 py-2.5 text-gray-400 hover:text-white hover:bg-gray-800 rounded-xl text-sm transition">
+          🚪 Sign Out
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── STAT CARD ────────────────────────────────────────────────────────────────
+const StatCard = ({ icon, label, value, sub, color }) => (
+  <div className="card bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+    <div className="flex items-start justify-between">
+      <div>
+        <p className="text-sm text-gray-500 font-medium">{label}</p>
+        <p className="text-3xl font-bold text-gray-900 mt-1">{value ?? '—'}</p>
+        {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
+      </div>
+      <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl" style={{background:color+'22'}}>
+        {icon}
+      </div>
+    </div>
+  </div>
+);
+
+// ─── TASK ROW ────────────────────────────────────────────────────────────────
+const TaskRow = ({ task, onClick }) => (
+  <tr onClick={onClick} className="hover:bg-indigo-50 cursor-pointer transition">
+    <td className="px-4 py-3">
+      <p className="text-sm font-medium text-gray-900">{task.title}</p>
+      <p className="text-xs text-gray-400">{task.project_name}</p>
+    </td>
+    <td className="px-4 py-3"><Badge config={STATUS_CONFIG[task.status]} /></td>
+    <td className="px-4 py-3"><Badge config={PRIORITY_CONFIG[task.priority]} /></td>
+    <td className="px-4 py-3">
+      <span className={`text-xs font-medium ${isOverdue(task.due_date, task.status)?'text-red-500':' text-gray-500'}`}>{fmtDate(task.due_date)}</span>
+    </td>
+    <td className="px-4 py-3">
+      {task.assignee_name ? (
+        <div className="flex items-center gap-2">
+          <Avatar name={task.assignee_name} size={26} color="#6366f1" />
+          <span className="text-xs text-gray-600">{task.assignee_name}</span>
+        </div>
+      ) : <span className="text-xs text-gray-400">Unassigned</span>}
+    </td>
+  </tr>
+);
+
+// ─── DASHBOARD PAGE ───────────────────────────────────────────────────────────
+function DashboardPage({ user, onNavigateTask }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api('/dashboard').then(setData).finally(()=>setLoading(false));
+  }, []);
+
+  if (loading) return <div className="flex items-center justify-center h-64"><div className="spinner" style={{borderColor:'#6366f1',borderTopColor:'transparent',width:36,height:36,borderWidth:3}} /></div>;
+
+  const s = data?.stats || {};
+  const completion = s.total_tasks > 0 ? Math.round((s.completed / s.total_tasks) * 100) : 0;
+
+  return (
+    <div>
+      <div className="mb-8">
+        <h1 className="text-2xl font-bold text-gray-900">Good day, {user.name.split(' ')[0]}! 👋</h1>
+        <p className="text-gray-500 mt-1">Here's what's happening across your projects</p>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <StatCard icon="📁" label="Total Projects" value={s.total_projects} color="#6366f1" />
+        <StatCard icon="✅" label="Total Tasks" value={s.total_tasks} color="#10b981" />
+        <StatCard icon="🔄" label="In Progress" value={s.in_progress} color="#3b82f6" />
+        <StatCard icon="🔥" label="Overdue" value={s.overdue} color="#ef4444" sub={s.overdue > 0 ? 'Needs attention' : 'All on track!'} />
+      </div>
+
+      <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-gray-800">Overall Completion</h3>
+          <span className="text-sm font-bold text-indigo-600">{completion}%</span>
+        </div>
+        <div className="progress-bar"><div className="progress-fill" style={{width:`${completion}%`}} /></div>
+        <div className="flex justify-between text-xs text-gray-400 mt-2">
+          <span>{s.completed} done</span>
+          <span>{s.in_review} in review</span>
+          <span>{s.in_progress} in progress</span>
+          <span>{s.todo} todo</span>
+        </div>
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-6">
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+            <h3 className="font-semibold text-gray-800">🕒 My Tasks</h3>
+            <span className="text-xs text-gray-400">{data?.my_tasks?.length || 0} tasks</span>
+          </div>
+          <div className="divide-y divide-gray-50">
+            {(data?.my_tasks || []).length === 0 ? (
+              <p className="text-center text-gray-400 py-8 text-sm">No tasks assigned to you</p>
+            ) : (data?.my_tasks || []).map(t => (
+              <div key={t.id} className="flex items-center justify-between px-6 py-3 hover:bg-gray-50 cursor-pointer" onClick={()=>onNavigateTask&&onNavigateTask(t)}>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-800 truncate">{t.title}</p>
+                  <p className="text-xs text-gray-400">{t.project_name}</p>
+                </div>
+                <div className="flex items-center gap-2 ml-3">
+                  <Badge config={STATUS_CONFIG[t.status]} />
+                  {isOverdue(t.due_date, t.status) && <span className="text-xs text-red-500">⚠️</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+          <div className="px-6 py-4 border-b flex items-center justify-between" style={{borderColor:'#fef2f2'}}>
+            <h3 className="font-semibold text-gray-800">⚠️ Overdue Tasks</h3>
+            <span className="text-xs text-red-400">{data?.overdue_tasks?.length || 0} overdue</span>
+          </div>
+          <div className="divide-y divide-gray-50">
+            {(data?.overdue_tasks || []).length === 0 ? (
+              <p className="text-center text-gray-400 py-8 text-sm">🎉 No overdue tasks!</p>
+            ) : (data?.overdue_tasks || []).map(t => (
+              <div key={t.id} className="flex items-center justify-between px-6 py-3 hover:bg-red-50 cursor-pointer">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-800 truncate">{t.title}</p>
+                  <p className="text-xs text-red-400">{t.project_name} · Due {fmtDate(t.due_date)}</p>
+                </div>
+                <Badge config={PRIORITY_CONFIG[t.priority]} />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── TASK MODAL ───────────────────────────────────────────────────────────────
+function TaskModal({ task, user, projects, users, onClose, onSave }) {
+  const isNew = !task?.id;
+  const [form, setForm] = useState({
+    project_id: task?.project_id || '',
+    title: task?.title || '',
+    description: task?.description || '',
+    assigned_to: task?.assigned_to || '',
+    status: task?.status || 'todo',
+    priority: task?.priority || 'medium',
+    due_date: task?.due_date ? task.due_date.substring(0,10) : '',
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError(''); setLoading(true);
+    try {
+      let saved;
+      const body = { ...form, project_id: parseInt(form.project_id), assigned_to: form.assigned_to ? parseInt(form.assigned_to) : null };
+      if (isNew) { saved = await api('/tasks', { method:'POST', body }); }
+      else { saved = await api(`/tasks/${task.id}`, { method:'PUT', body }); }
+      onSave(saved);
+    } catch(err) { setError(err.message); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <Modal title={isNew ? '➕ New Task' : '✏️ Edit Task'} onClose={onClose} wide>
+      <form onSubmit={submit}>
+        <Select label="Project *" value={form.project_id} onChange={e=>set('project_id',e.target.value)} required>
+          <option value="">Select project...</option>
+          {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+        </Select>
+        <Input label="Task Title *" placeholder="What needs to be done?" value={form.title} onChange={e=>set('title',e.target.value)} required />
+        <Textarea label="Description" placeholder="Add more details..." value={form.description} onChange={e=>set('description',e.target.value)} />
+        <div className="grid grid-cols-2 gap-4">
+          <Select label="Status" value={form.status} onChange={e=>set('status',e.target.value)}>
+            {Object.entries(STATUS_CONFIG).map(([v,c])=><option key={v} value={v}>{c.label}</option>)}
+          </Select>
+          <Select label="Priority" value={form.priority} onChange={e=>set('priority',e.target.value)}>
+            {Object.entries(PRIORITY_CONFIG).map(([v,c])=><option key={v} value={v}>{c.label}</option>)}
+          </Select>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <Select label="Assign To" value={form.assigned_to} onChange={e=>set('assigned_to',e.target.value)}>
+            <option value="">Unassigned</option>
+            {users.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+          </Select>
+          <Input label="Due Date" type="date" value={form.due_date} onChange={e=>set('due_date',e.target.value)} />
+        </div>
+        {error && <div className="bg-red-50 text-red-600 text-sm rounded-xl px-4 py-3 mb-4">{error}</div>}
+        <div className="flex gap-3 pt-2">
+          <Btn loading={loading}>{isNew ? '✅ Create Task' : '💾 Save Changes'}</Btn>
+          <Btn variant="secondary" type="button" onClick={onClose}>Cancel</Btn>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ─── TASKS PAGE ───────────────────────────────────────────────────────────────
+function TasksPage({ user }) {
+  const [tasks, setTasks] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState({ status:'', priority:'', project_id:'' });
+  const [showModal, setShowModal] = useState(false);
+  const [editTask, setEditTask] = useState(null);
+  const { toast, show } = useToast();
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (filter.status) params.append('status', filter.status);
+      if (filter.priority) params.append('priority', filter.priority);
+      if (filter.project_id) params.append('project_id', filter.project_id);
+      const [t, p, u] = await Promise.all([
+        api(`/tasks?${params}`),
+        api('/projects'),
+        api('/users'),
+      ]);
+      setTasks(t); setProjects(p); setUsers(u);
+    } catch(e) { show(e.message,'error'); }
+    finally { setLoading(false); }
+  }, [filter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleSave = (saved) => {
+    setTasks(prev => {
+      const idx = prev.findIndex(t=>t.id===saved.id);
+      if (idx>=0) { const next=[...prev]; next[idx]=saved; return next; }
+      return [saved, ...prev];
+    });
+    setShowModal(false); setEditTask(null);
+    show(editTask ? 'Task updated!' : 'Task created!');
+  };
+
+  const deleteTask = async (id) => {
+    if (!confirm('Delete this task?')) return;
+    try { await api(`/tasks/${id}`, {method:'DELETE'}); setTasks(t=>t.filter(x=>x.id!==id)); show('Task deleted'); }
+    catch(e) { show(e.message,'error'); }
+  };
+
+  const updateStatus = async (id, status) => {
+    try {
+      await api(`/tasks/${id}/status`, { method:'PATCH', body:{status} });
+      setTasks(t=>t.map(x=>x.id===id?{...x,status}:x));
+      show('Status updated!');
+    } catch(e) { show(e.message,'error'); }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Tasks</h1>
+          <p className="text-gray-500 text-sm mt-1">{tasks.length} tasks found</p>
+        </div>
+        <Btn onClick={()=>{setEditTask(null);setShowModal(true);}}>➕ New Task</Btn>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 mb-6 flex gap-3 flex-wrap">
+        <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white" value={filter.status} onChange={e=>setFilter(f=>({...f,status:e.target.value}))}>
+          <option value="">All Statuses</option>
+          {Object.entries(STATUS_CONFIG).map(([v,c])=><option key={v} value={v}>{c.label}</option>)}
+        </select>
+        <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white" value={filter.priority} onChange={e=>setFilter(f=>({...f,priority:e.target.value}))}>
+          <option value="">All Priorities</option>
+          {Object.entries(PRIORITY_CONFIG).map(([v,c])=><option key={v} value={v}>{c.label}</option>)}
+        </select>
+        <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white" value={filter.project_id} onChange={e=>setFilter(f=>({...f,project_id:e.target.value}))}>
+          <option value="">All Projects</option>
+          {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        {(filter.status||filter.priority||filter.project_id) && (
+          <button onClick={()=>setFilter({status:'',priority:'',project_id:''})} className="text-sm text-indigo-600 hover:underline">Clear filters</button>
+        )}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+        {loading ? (
+          <div className="text-center py-12"><div className="spinner mx-auto" style={{borderColor:'#6366f1',borderTopColor:'transparent',width:32,height:32,borderWidth:3}} /></div>
+        ) : tasks.length === 0 ? (
+          <div className="text-center py-16">
+            <div className="text-5xl mb-3">📋</div>
+            <p className="text-gray-500">No tasks found</p>
+            <Btn className="mt-4" onClick={()=>setShowModal(true)}>Create your first task</Btn>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-gray-100 bg-gray-50">
+                  {['Task','Status','Priority','Due Date','Assigned To','Actions'].map(h=>(
+                    <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {tasks.map(task => (
+                  <tr key={task.id} className="hover:bg-gray-50 transition">
+                    <td className="px-4 py-3">
+                      <p className="text-sm font-medium text-gray-900">{task.title}</p>
+                      <p className="text-xs text-gray-400">{task.project_name}</p>
+                    </td>
+                    <td className="px-4 py-3">
+                      <select value={task.status} onChange={e=>updateStatus(task.id,e.target.value)}
+                        className="text-xs font-semibold px-2 py-1 rounded-full border-0 cursor-pointer"
+                        style={{background:STATUS_CONFIG[task.status].bg,color:STATUS_CONFIG[task.status].text}}>
+                        {Object.entries(STATUS_CONFIG).map(([v,c])=><option key={v} value={v}>{c.label}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-4 py-3"><Badge config={PRIORITY_CONFIG[task.priority]} /></td>
+                    <td className="px-4 py-3">
+                      <span className={`text-xs font-medium ${isOverdue(task.due_date,task.status)?'text-red-500':'text-gray-500'}`}>
+                        {isOverdue(task.due_date,task.status) && '⚠️ '}{fmtDate(task.due_date)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      {task.assignee_name ? (
+                        <div className="flex items-center gap-2">
+                          <Avatar name={task.assignee_name} size={24} color="#6366f1" />
+                          <span className="text-xs">{task.assignee_name}</span>
+                        </div>
+                      ) : <span className="text-xs text-gray-400">Unassigned</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-1">
+                        <button onClick={()=>{setEditTask(task);setShowModal(true);}} className="p-1.5 hover:bg-indigo-50 rounded-lg text-gray-400 hover:text-indigo-600 transition text-sm">✏️</button>
+                        {(user.role==='admin'||task.created_by===user.id) && (
+                          <button onClick={()=>deleteTask(task.id)} className="p-1.5 hover:bg-red-50 rounded-lg text-gray-400 hover:text-red-500 transition text-sm">🗑️</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {showModal && <TaskModal task={editTask} user={user} projects={projects} users={users} onClose={()=>{setShowModal(false);setEditTask(null);}} onSave={handleSave} />}
+      <Toast {...(toast||{})} />
+    </div>
+  );
+}
+
+// ─── PROJECT CARD ─────────────────────────────────────────────────────────────
+function ProjectCard({ project, onClick, onDelete, isAdmin }) {
+  const completion = project.task_count > 0 ? Math.round((project.completed_tasks / project.task_count) * 100) : 0;
+  const colors = ['#6366f1','#0891b2','#059669','#d97706','#dc2626','#7c3aed'];
+  const color = colors[project.id % colors.length];
+
+  return (
+    <div className="card bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden cursor-pointer" onClick={onClick}>
+      <div className="h-2" style={{background:color}} />
+      <div className="p-6">
+        <div className="flex items-start justify-between mb-3">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl" style={{background:color+'22'}}> 📁</div>
+          {isAdmin && (
+            <button onClick={e=>{e.stopPropagation();onDelete(project.id);}} className="p-1.5 hover:bg-red-50 rounded-lg text-gray-300 hover:text-red-400 transition">🗑️</button>
+          )}
+        </div>
+        <h3 className="font-bold text-gray-900 mb-1">{project.name}</h3>
+        <p className="text-sm text-gray-400 mb-4 line-clamp-2">{project.description || 'No description'}</p>
+
+        <div className="progress-bar mb-2"><div className="progress-fill" style={{width:`${completion}%`,background:color}} /></div>
+        <div className="flex items-center justify-between text-xs text-gray-400">
+          <span>{completion}% complete</span>
+          <span>{project.completed_tasks}/{project.task_count} tasks</span>
+        </div>
+
+        <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-50">
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm">👥</span>
+            <span className="text-xs text-gray-500">{project.member_count} members</span>
+          </div>
+          <span className={`badge text-xs ${project.status==='active'?'bg-emerald-50 text-emerald-700':'bg-gray-100 text-gray-500'}`}>
+            {project.status}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PROJECT DETAIL MODAL ────────────────────────────────────────────────────
+function ProjectDetailModal({ projectId, user, users, onClose, onUpdated }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [addUserId, setAddUserId] = useState('');
+  const [addRole, setAddRole] = useState('member');
+  const [saving, setSaving] = useState(false);
+  const { toast, show } = useToast();
+
+  const load = async () => {
+    setLoading(true);
+    try { setData(await api(`/projects/${projectId}`)); }
+    catch(e) { show(e.message,'error'); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, [projectId]);
+
+  const addMember = async () => {
+    if (!addUserId) return;
+    setSaving(true);
+    try { await api(`/projects/${projectId}/members`, { method:'POST', body:{user_id:parseInt(addUserId), role:addRole} }); await load(); show('Member added!'); setAddUserId(''); }
+    catch(e) { show(e.message,'error'); }
+    finally { setSaving(false); }
+  };
+
+  const removeMember = async (userId) => {
+    if (!confirm('Remove member?')) return;
+    try { await api(`/projects/${projectId}/members/${userId}`, { method:'DELETE' }); await load(); show('Member removed'); }
+    catch(e) { show(e.message,'error'); }
+  };
+
+  if (loading) return (
+    <Modal title="Project Details" onClose={onClose} wide>
+      <div className="text-center py-12"><div className="spinner mx-auto" style={{borderColor:'#6366f1',borderTopColor:'transparent',width:32,height:32,borderWidth:3}} /></div>
+    </Modal>
+  );
+
+  const memberIds = new Set((data?.members||[]).map(m=>m.id));
+  const available = users.filter(u=>!memberIds.has(u.id));
+
+  return (
+    <Modal title={`📁 ${data?.project?.name}`} onClose={onClose} wide>
+      <Toast {...(toast||{})} />
+      <p className="text-sm text-gray-500 mb-6">{data?.project?.description}</p>
+
+      <div className="grid grid-cols-3 gap-3 mb-6">
+        {[
+          { label:'Total Tasks', value: data?.tasks?.length || 0 },
+          { label:'Completed', value: data?.tasks?.filter(t=>t.status==='done').length || 0 },
+          { label:'Members', value: data?.members?.length || 0 },
+        ].map(s=>(
+          <div key={s.label} className="bg-indigo-50 rounded-xl p-4 text-center">
+            <div className="text-2xl font-bold text-indigo-700">{s.value}</div>
+            <div className="text-xs text-indigo-500 mt-0.5">{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <h3 className="font-semibold text-gray-800 mb-3">Team Members</h3>
+      <div className="space-y-2 mb-4">
+        {(data?.members||[]).map(m => (
+          <div key={m.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl">
+            <div className="flex items-center gap-3">
+              <Avatar name={m.name} size={32} color={m.project_role==='admin'?'#7c3aed':'#0891b2'} />
+              <div>
+                <p className="text-sm font-medium text-gray-800">{m.name}</p>
+                <p className="text-xs text-gray-400">{m.email}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="badge text-xs" style={{background:m.project_role==='admin'?'#f5f3ff':'#eff6ff',color:m.project_role==='admin'?'#7c3aed':'#1d4ed8'}}>{m.project_role}</span>
+              {user.role==='admin' && m.id!==user.id && (
+                <button onClick={()=>removeMember(m.id)} className="p-1 hover:bg-red-50 rounded text-gray-300 hover:text-red-400 text-sm">✕</button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {user.role==='admin' && available.length > 0 && (
+        <div className="border-t border-gray-100 pt-4">
+          <h4 className="text-sm font-semibold text-gray-700 mb-3">Add Member</h4>
+          <div className="flex gap-2">
+            <select className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white" value={addUserId} onChange={e=>setAddUserId(e.target.value)}>
+              <option value="">Select user...</option>
+              {available.map(u=><option key={u.id} value={u.id}>{u.name} ({u.email})</option>)}
+            </select>
+            <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white" value={addRole} onChange={e=>setAddRole(e.target.value)}>
+              <option value="member">Member</option>
+              <option value="admin">Admin</option>
+            </select>
+            <Btn loading={saving} onClick={addMember}>Add</Btn>
+          </div>
+        </div>
+      )}
+
+      {(data?.tasks||[]).length > 0 && (
+        <div className="border-t border-gray-100 pt-4 mt-4">
+          <h4 className="text-sm font-semibold text-gray-700 mb-3">Recent Tasks</h4>
+          <div className="space-y-2">
+            {data.tasks.slice(0,5).map(t => (
+              <div key={t.id} className="flex items-center justify-between p-2.5 bg-gray-50 rounded-xl">
+                <p className="text-sm text-gray-800">{t.title}</p>
+                <div className="flex gap-2">
+                  <Badge config={STATUS_CONFIG[t.status]} />
+                  <Badge config={PRIORITY_CONFIG[t.priority]} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// ─── PROJECTS PAGE ────────────────────────────────────────────────────────────
+function ProjectsPage({ user }) {
+  const [projects, setProjects] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+  const [selectedId, setSelectedId] = useState(null);
+  const [form, setForm] = useState({ name:'', description:'' });
+  const [saving, setSaving] = useState(false);
+  const { toast, show } = useToast();
+
+  const load = async () => {
+    setLoading(true);
+    try { const [p,u] = await Promise.all([api('/projects'),api('/users')]); setProjects(p); setUsers(u); }
+    catch(e) { show(e.message,'error'); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const create = async (e) => {
+    e.preventDefault(); setSaving(true);
+    try { const p = await api('/projects',{method:'POST',body:form}); setProjects(prev=>[p,...prev]); setShowCreate(false); setForm({name:'',description:''}); show('Project created!'); }
+    catch(e) { show(e.message,'error'); }
+    finally { setSaving(false); }
+  };
+
+  const deleteProject = async (id) => {
+    if (!confirm('Delete this project and all its tasks?')) return;
+    try { await api(`/projects/${id}`,{method:'DELETE'}); setProjects(p=>p.filter(x=>x.id!==id)); show('Project deleted'); }
+    catch(e) { show(e.message,'error'); }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Projects</h1>
+          <p className="text-gray-500 text-sm mt-1">{projects.length} projects</p>
+        </div>
+        {user.role==='admin' && <Btn onClick={()=>setShowCreate(true)}>➕ New Project</Btn>}
+      </div>
+
+      {loading ? (
+        <div className="text-center py-16"><div className="spinner mx-auto" style={{borderColor:'#6366f1',borderTopColor:'transparent',width:36,height:36,borderWidth:3}} /></div>
+      ) : projects.length === 0 ? (
+        <div className="text-center py-20 bg-white rounded-2xl border border-gray-100">
+          <div className="text-6xl mb-4">📁</div>
+          <p className="text-gray-500 mb-4">No projects yet</p>
+          {user.role==='admin' && <Btn onClick={()=>setShowCreate(true)}>Create your first project</Btn>}
+        </div>
+      ) : (
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
+          {projects.map(p => (
+            <ProjectCard key={p.id} project={p} isAdmin={user.role==='admin'} onClick={()=>setSelectedId(p.id)} onDelete={deleteProject} />
+          ))}
+        </div>
+      )}
+
+      {showCreate && (
+        <Modal title="🆕 New Project" onClose={()=>setShowCreate(false)}>
+          <form onSubmit={create}>
+            <Input label="Project Name *" placeholder="e.g. Website Redesign" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} required />
+            <Textarea label="Description" placeholder="What is this project about?" value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} />
+            <div className="flex gap-3">
+              <Btn loading={saving}>🚀 Create Project</Btn>
+              <Btn variant="secondary" type="button" onClick={()=>setShowCreate(false)}>Cancel</Btn>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {selectedId && (
+        <ProjectDetailModal projectId={selectedId} user={user} users={users} onClose={()=>setSelectedId(null)} onUpdated={load} />
+      )}
+
+      <Toast {...(toast||{})} />
+    </div>
+  );
+}
+
+// ─── TEAM PAGE ────────────────────────────────────────────────────────────────
+function TeamPage({ user }) {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const { toast, show } = useToast();
+
+  const load = () => { setLoading(true); api('/users').then(setUsers).catch(e=>show(e.message,'error')).finally(()=>setLoading(false)); };
+  useEffect(()=>{ load(); },[]);
+
+  const changeRole = async (id, role) => {
+    try { await api(`/users/${id}/role`,{method:'PUT',body:{role}}); setUsers(u=>u.map(x=>x.id===id?{...x,role}:x)); show('Role updated!'); }
+    catch(e) { show(e.message,'error'); }
+  };
+
+  const deleteUser = async (id) => {
+    if (!confirm('Delete user?')) return;
+    try { await api(`/users/${id}`,{method:'DELETE'}); setUsers(u=>u.filter(x=>x.id!==id)); show('User deleted'); }
+    catch(e) { show(e.message,'error'); }
+  };
+
+  return (
+    <div>
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Team Management</h1>
+        <p className="text-gray-500 text-sm mt-1">{users.length} members in your organization</p>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+        {loading ? (
+          <div className="text-center py-12"><div className="spinner mx-auto" style={{borderColor:'#6366f1',borderTopColor:'transparent',width:32,height:32,borderWidth:3}} /></div>
+        ) : (
+          <table className="w-full">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-100">
+                {['User','System Role','Projects','Tasks','Actions'].map(h=>(
+                  <th key={h} className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {users.map(u => (
+                <tr key={u.id} className="hover:bg-gray-50 transition">
+                  <td className="px-6 py-4">
+                    <div className="flex items-center gap-3">
+                      <Avatar name={u.name} size={38} color={u.role==='admin'?'#7c3aed':'#0891b2'} />
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">{u.name} {u.id===user.id && <span className="text-xs text-indigo-400 font-normal">(you)</span>}</p>
+                        <p className="text-xs text-gray-400">{u.email}</p>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4">
+                    {u.id===user.id ? (
+                      <Badge config={{bg:u.role==='admin'?'#f5f3ff':'#eff6ff',text:u.role==='admin'?'#7c3aed':'#1d4ed8',label:u.role}} />
+                    ) : (
+                      <select value={u.role} onChange={e=>changeRole(u.id,e.target.value)}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-full border border-gray-200 bg-white cursor-pointer">
+                        <option value="member">member</option>
+                        <option value="admin">admin</option>
+                      </select>
+                    )}
+                  </td>
+                  <td className="px-6 py-4"><span className="text-sm text-gray-600">{u.project_count || 0}</span></td>
+                  <td className="px-6 py-4"><span className="text-sm text-gray-600">{u.task_count || 0}</span></td>
+                  <td className="px-6 py-4">
+                    {u.id!==user.id && (
+                      <button onClick={()=>deleteUser(u.id)} className="p-2 hover:bg-red-50 rounded-lg text-gray-300 hover:text-red-400 transition text-sm">🗑️</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      <Toast {...(toast||{})} />
+    </div>
+  );
+}
+
+// ─── APP ROOT ─────────────────────────────────────────────────────────────────
+function App() {
+  const [user, setUser] = useState(null);
+  const [page, setPage] = useState('dashboard');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = getToken();
+    if (!token) { setLoading(false); return; }
+    api('/auth/me').then(data => setUser(data.user)).catch(()=>localStorage.removeItem('tf_token')).finally(()=>setLoading(false));
+  }, []);
+
+  const onLogin = (u) => setUser(u);
+  const onLogout = () => { localStorage.removeItem('tf_token'); setUser(null); setPage('dashboard'); };
+
+  if (loading) return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-50 to-purple-50">
+      <div className="text-center">
+        <div className="text-5xl mb-4">⚡</div>
+        <div className="spinner mx-auto" style={{borderColor:'#6366f1',borderTopColor:'transparent',width:32,height:32,borderWidth:3}} />
+        <p className="text-gray-500 mt-4 text-sm">Loading Planify...</p>
+      </div>
+    </div>
+  );
+
+  if (!user) return <AuthPage onLogin={onLogin} />;
+
+  const pages = {
+    dashboard: <DashboardPage user={user} onNavigateTask={()=>setPage('tasks')} />,
+    projects:  <ProjectsPage user={user} />,
+    tasks:     <TasksPage user={user} />,
+    team:      <TeamPage user={user} />,
+  };
+
+  return (
+    <div className="flex min-h-screen bg-gray-50">
+      <Sidebar user={user} page={page} setPage={setPage} onLogout={onLogout} />
+      <main className="flex-1 overflow-auto">
+        <div className="max-w-7xl mx-auto p-8">
+          {pages[page] || pages.dashboard}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
